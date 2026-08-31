@@ -1,0 +1,16 @@
+🚀 Excited to share my final Capstone Project for the Machine Learning & Data Analysis Track! 
+
+For this project, I tackled a critical business problem: Customer Churn Prediction. Acquiring new customers is expensive, so identifying at-risk customers early is vital for proactive retention.
+
+💡 Key Highlights of the Project:
+- Addressed Data Leakage by engineering a strict Scikit-Learn Pipeline combining imputation, outlier capping, log-transformations, and scaling.
+- Evaluated multiple models during the experimentation phase, including Logistic Regression, Random Forest, and XGBoost, while optimizing for F1-Score and ROC-AUC rather than misleading accuracy metrics.
+- Explored SMOTE during experimentation for class imbalance, then selected XGBoost as the best-performing model.
+- Built the final training and deployment pipeline around XGBoost, using its `scale_pos_weight` handling instead of SMOTE in the production pipeline.
+- Deployed the final model as an interactive web application using Streamlit, allowing business users to input customer profiles and receive real-time churn risk probabilities!
+
+This hands-on experience bridged the gap between theoretical data science and robust, production-ready machine learning engineering. 
+
+Check out the full code and try the Streamlit app on my GitHub: [Insert GitHub Link Here]
+
+#MachineLearning #DataScience #Python #Streamlit #CustomerChurn #PredictiveAnalytics #XGBoost #DataAnalysis #CapstoneProject
