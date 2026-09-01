@@ -606,7 +606,7 @@ with tab2:
             "figure.facecolor": "#0b0f19", "axes.facecolor": "#0b0f19",
             "axes.edgecolor": "none", "axes.labelcolor": "#94a3b8",
             "xtick.color": "#94a3b8", "ytick.color": "#94a3b8",
-            "text.color": "#f8fafc", "grid.color": "rgba(255,255,255,0.05)",
+            "text.color": "#f8fafc", "grid.color": '#FFFFFF0C',
         }
         plt.rcParams.update(chart_style)
 
