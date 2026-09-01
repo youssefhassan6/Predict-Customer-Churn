@@ -651,8 +651,8 @@ The goal is not simply to predict **who may churn**, but to help answer the more
 
 # 👥 Authors
 
-**Youssef Hassan**
-**Ali Mohamed**
+**Youssef Hassan**,
+**Ali Mohamed**,
 **Nabil Sultan**
 
 Developed as the Capstone Project for the **Machine Learning & Data Analysis Track**.
