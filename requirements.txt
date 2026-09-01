@@ -4,9 +4,8 @@ numpy
 scikit-learn
 joblib
 xgboost
-lightgbm
 imbalanced-learn
 matplotlib
 seaborn
-jupyter
-notebook
+google-genai
+python-dotenv

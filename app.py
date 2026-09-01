@@ -1,654 +1,762 @@
+"""
+app.py  –  ChurnIQ: AI-Powered Customer Retention Dashboard
+============================================================
+Two modes:
+  Tab 1 – Single Customer Prediction  (manual input + Gemini recommendation)
+  Tab 2 – Batch Customer Analysis     (CSV upload + bulk ML + Gemini for top-N)
+
+ML model: churn_artifacts.pkl  (XGBoost pipeline, optimal threshold, metrics)
+Gemini:   gemini_service.py    (business recommendations only, never re-predicts)
+"""
+
 import streamlit as st
 import pandas as pd
-import joblib
 import numpy as np
-import custom_transformers
+import joblib
+import io
+import custom_transformers          # needed so joblib can deserialise IQRCapper
+import gemini_service as gs
 
-# =========================
-# Page Configuration & Aesthetics
-# =========================
+# ── Page config ───────────────────────────────────────────────────────────────
 st.set_page_config(
-    page_title="ChurnIQ | AI Prediction",
+    page_title="ChurnIQ | AI Retention Platform",
     page_icon="⚡",
     layout="wide",
-    initial_sidebar_state="collapsed"
+    initial_sidebar_state="collapsed",
 )
 
-# Custom CSS for Premium Design
+# ── CSS ───────────────────────────────────────────────────────────────────────
 st.markdown("""
 <style>
-    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap');
-    
-    :root {
-        --bg-color: #0b0f19;
-        --card-bg: rgba(26, 32, 53, 0.7);
-        --card-border: rgba(255, 255, 255, 0.08);
-        --primary: #3b82f6;
-        --primary-glow: rgba(59, 130, 246, 0.4);
-        --text-main: #f8fafc;
-        --text-muted: #94a3b8;
-        --risk-low: #10b981;
-        --risk-med: #f59e0b;
-        --risk-high: #ef4444;
-    }
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap');
 
-    html, body, [class*="css"]  {
-        font-family: 'Inter', sans-serif !important;
-    }
-    
-    /* Main Background */
-    .stApp {
-        background-color: var(--bg-color);
-        background-image: 
-            radial-gradient(at 0% 0%, rgba(15, 23, 42, 1) 0, transparent 50%), 
-            radial-gradient(at 50% 0%, rgba(30, 58, 138, 0.15) 0, transparent 50%), 
-            radial-gradient(at 100% 0%, rgba(15, 23, 42, 1) 0, transparent 50%);
-        color: var(--text-main);
-    }
+:root {
+    --bg:          #0b0f19;
+    --card:        rgba(22, 28, 48, 0.85);
+    --border:      rgba(255,255,255,0.08);
+    --primary:     #3b82f6;
+    --glow:        rgba(59,130,246,0.35);
+    --text:        #f8fafc;
+    --muted:       #94a3b8;
+    --green:       #10b981;
+    --amber:       #f59e0b;
+    --red:         #ef4444;
+}
 
-    /* Hide Streamlit Branding */
-    #MainMenu {visibility: hidden;}
-    footer {visibility: hidden;}
-    header {visibility: hidden;}
-    
-    /* Custom Top Navigation */
-    .top-nav {
-        display: flex;
-        justify-content: space-between;
-        align-items: center;
-        padding: 1.5rem 2rem;
-        background: rgba(15, 23, 42, 0.8);
-        backdrop-filter: blur(12px);
-        border-bottom: 1px solid var(--card-border);
-        margin-bottom: 2rem;
-        border-radius: 0 0 16px 16px;
-    }
-    .brand {
-        font-size: 1.5rem;
-        font-weight: 800;
-        letter-spacing: -0.5px;
-        color: white;
-        display: flex;
-        align-items: center;
-        gap: 0.5rem;
-    }
-    .brand-accent {
-        background: linear-gradient(135deg, #60a5fa, #3b82f6);
-        -webkit-background-clip: text;
-        -webkit-text-fill-color: transparent;
-    }
-    .status-indicator {
-        display: flex;
-        align-items: center;
-        gap: 0.5rem;
-        font-size: 0.85rem;
-        font-weight: 600;
-        color: var(--risk-low);
-        background: rgba(16, 185, 129, 0.1);
-        padding: 0.4rem 1rem;
-        border-radius: 50px;
-        border: 1px solid rgba(16, 185, 129, 0.2);
-    }
-    .status-dot {
-        width: 8px;
-        height: 8px;
-        background-color: var(--risk-low);
-        border-radius: 50%;
-        box-shadow: 0 0 8px var(--risk-low);
-        animation: pulse 2s infinite;
-    }
-    
-    @keyframes pulse {
-        0% { box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.4); }
-        70% { box-shadow: 0 0 0 6px rgba(16, 185, 129, 0); }
-        100% { box-shadow: 0 0 0 0 rgba(16, 185, 129, 0); }
-    }
+html, body, [class*="css"] { font-family: 'Inter', sans-serif !important; }
 
-    /* Hero Section */
-    .hero {
-        text-align: center;
-        margin-bottom: 3rem;
-        padding: 0 1rem;
-    }
-    .hero h1 {
-        font-size: 3.5rem;
-        font-weight: 800;
-        letter-spacing: -1px;
-        margin-bottom: 1rem;
-        background: linear-gradient(to right, #ffffff, #94a3b8);
-        -webkit-background-clip: text;
-        -webkit-text-fill-color: transparent;
-    }
-    .hero p {
-        font-size: 1.15rem;
-        color: var(--text-muted);
-        max-width: 600px;
-        margin: 0 auto;
-        line-height: 1.6;
-    }
-    
-    /* Section Headers */
-    .section-header {
-        font-size: 1.1rem;
-        font-weight: 600;
-        color: #e2e8f0;
-        margin-bottom: 1.5rem;
-        display: flex;
-        align-items: center;
-        gap: 0.5rem;
-        text-transform: uppercase;
-        letter-spacing: 1px;
-        border-bottom: 1px solid var(--card-border);
-        padding-bottom: 0.75rem;
-    }
-    
-    /* Input Styling overrides */
-    div[data-baseweb="select"] > div {
-        background-color: rgba(15, 23, 42, 0.6) !important;
-        border-color: rgba(255, 255, 255, 0.1) !important;
-        border-radius: 8px !important;
-        color: white !important;
-    }
-    input[type="number"] {
-        background-color: rgba(15, 23, 42, 0.6) !important;
-        border: 1px solid rgba(255, 255, 255, 0.1) !important;
-        border-radius: 8px !important;
-        color: white !important;
-    }
-    .stNumberInput > div > div > div {
-        background-color: rgba(15, 23, 42, 0.6) !important;
-        border: none !important;
-    }
-    
-    /* Primary CTA Button */
-    .stButton>button {
-        background: linear-gradient(135deg, #2563eb, #1d4ed8) !important;
-        color: white !important;
-        border: 1px solid rgba(255,255,255,0.1) !important;
-        border-radius: 12px !important;
-        padding: 1rem 2rem !important;
-        font-weight: 700 !important;
-        font-size: 1.2rem !important;
-        letter-spacing: 1px !important;
-        text-transform: uppercase !important;
-        transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1) !important;
-        width: 100% !important;
-        box-shadow: 0 4px 20px -2px var(--primary-glow) !important;
-    }
-    
-    .stButton>button:hover {
-        transform: translateY(-2px) !important;
-        box-shadow: 0 8px 30px -2px rgba(59, 130, 246, 0.6) !important;
-        background: linear-gradient(135deg, #3b82f6, #2563eb) !important;
-    }
-    
-    /* Result Card Styles */
-    .result-card {
-        background: rgba(15, 23, 42, 0.8);
-        backdrop-filter: blur(16px);
-        border: 1px solid var(--card-border);
-        border-radius: 20px;
-        padding: 2.5rem;
-        text-align: center;
-        box-shadow: 0 20px 40px -10px rgba(0,0,0,0.5);
-        margin: 2rem 0;
-        position: relative;
-        overflow: hidden;
-    }
-    
-    .result-card::before {
-        content: '';
-        position: absolute;
-        top: 0;
-        left: 0;
-        right: 0;
-        height: 4px;
-    }
-    
-    .risk-high::before { background: var(--risk-high); }
-    .risk-med::before { background: var(--risk-med); }
-    .risk-low::before { background: var(--risk-low); }
-    
-    .risk-badge {
-        display: inline-block;
-        padding: 0.5rem 1.5rem;
-        border-radius: 50px;
-        font-weight: 700;
-        font-size: 1.1rem;
-        margin-bottom: 1.5rem;
-        letter-spacing: 1px;
-    }
-    .badge-high { background: rgba(239, 68, 68, 0.1); color: var(--risk-high); border: 1px solid rgba(239, 68, 68, 0.2); }
-    .badge-med { background: rgba(245, 158, 11, 0.1); color: var(--risk-med); border: 1px solid rgba(245, 158, 11, 0.2); }
-    .badge-low { background: rgba(16, 185, 129, 0.1); color: var(--risk-low); border: 1px solid rgba(16, 185, 129, 0.2); }
-    
-    .prob-value {
-        font-size: 4.5rem;
-        font-weight: 800;
-        line-height: 1;
-        margin-bottom: 0.5rem;
-    }
-    
-    .prob-label {
-        color: var(--text-muted);
-        font-size: 1.1rem;
-        font-weight: 500;
-        text-transform: uppercase;
-        letter-spacing: 2px;
-        margin-bottom: 2rem;
-    }
-    
-    /* Model Info Section */
-    .model-info-grid {
-        display: grid;
-        grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
-        gap: 1rem;
-        margin-top: 1rem;
-    }
-    .model-metric {
-        background: rgba(255,255,255,0.03);
-        border: 1px solid var(--card-border);
-        padding: 1rem;
-        border-radius: 12px;
-        text-align: center;
-    }
-    .metric-val {
-        font-size: 1.5rem;
-        font-weight: 700;
-        color: #e2e8f0;
-    }
-    .metric-lbl {
-        font-size: 0.75rem;
-        color: var(--text-muted);
-        text-transform: uppercase;
-        letter-spacing: 1px;
-        margin-top: 0.25rem;
-    }
-    
-    /* Footer */
-    .custom-footer {
-        text-align: center;
-        padding: 3rem 0;
-        color: var(--text-muted);
-        font-size: 0.9rem;
-        border-top: 1px solid var(--card-border);
-        margin-top: 4rem;
-    }
-    
-    /* Feature Importance Bars */
-    .feat-bar-container {
-        display: flex;
-        align-items: center;
-        margin-bottom: 0.8rem;
-    }
-    .feat-name {
-        width: 150px;
-        text-align: right;
-        padding-right: 1rem;
-        font-size: 0.9rem;
-        color: #cbd5e1;
-    }
-    .feat-bar-bg {
-        flex-grow: 1;
-        height: 8px;
-        background: rgba(255,255,255,0.1);
-        border-radius: 4px;
-        overflow: hidden;
-    }
-    .feat-bar-fill {
-        height: 100%;
-        background: var(--primary);
-        border-radius: 4px;
-    }
+/* ── App background ── */
+.stApp {
+    background: var(--bg);
+    background-image:
+        radial-gradient(ellipse at 20% 0%, rgba(30,58,138,.18) 0, transparent 55%),
+        radial-gradient(ellipse at 80% 0%, rgba(79,70,229,.1)  0, transparent 55%);
+    color: var(--text);
+}
+
+/* ── Hide default chrome ── */
+#MainMenu, footer, header { visibility: hidden; }
+
+/* ── Top nav ── */
+.top-nav {
+    display:flex; justify-content:space-between; align-items:center;
+    padding: 1.25rem 2rem;
+    background: rgba(11,15,25,.85);
+    backdrop-filter: blur(14px);
+    border-bottom: 1px solid var(--border);
+    border-radius: 0 0 14px 14px;
+    margin-bottom: 1.75rem;
+}
+.brand { font-size:1.45rem; font-weight:800; letter-spacing:-.5px; }
+.brand-accent {
+    background: linear-gradient(135deg,#60a5fa,#6366f1);
+    -webkit-background-clip:text; -webkit-text-fill-color:transparent;
+}
+.status-pill {
+    display:flex; align-items:center; gap:.45rem;
+    font-size:.78rem; font-weight:700; letter-spacing:.8px;
+    color: var(--green);
+    background: rgba(16,185,129,.1);
+    padding: .35rem .9rem;
+    border-radius:50px; border: 1px solid rgba(16,185,129,.22);
+}
+.pulse {
+    width:8px; height:8px; background:var(--green);
+    border-radius:50%;
+    box-shadow:0 0 7px var(--green);
+    animation: pulse 2s infinite;
+}
+@keyframes pulse {
+    0%   { box-shadow:0 0 0 0   rgba(16,185,129,.5); }
+    70%  { box-shadow:0 0 0 7px rgba(16,185,129,0);  }
+    100% { box-shadow:0 0 0 0   rgba(16,185,129,0);  }
+}
+
+/* ── Hero ── */
+.hero { text-align:center; padding:.5rem 1rem 2.5rem; }
+.hero h1 {
+    font-size:3rem; font-weight:800; letter-spacing:-1px; margin-bottom:.75rem;
+    background: linear-gradient(to right,#fff,#94a3b8);
+    -webkit-background-clip:text; -webkit-text-fill-color:transparent;
+}
+.hero p { font-size:1.1rem; color:var(--muted); max-width:580px; margin:0 auto; line-height:1.65; }
+
+/* ── Section headers ── */
+.sec-hdr {
+    font-size:.88rem; font-weight:700; letter-spacing:1.2px;
+    text-transform:uppercase; color:#cbd5e1;
+    border-bottom:1px solid var(--border);
+    padding-bottom:.6rem; margin-bottom:1.25rem;
+}
+
+/* ── Cards ── */
+.card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    padding: 1.5rem;
+    backdrop-filter: blur(10px);
+}
+
+/* ── KPI row ── */
+.kpi-grid {
+    display:grid; grid-template-columns:repeat(auto-fit, minmax(130px,1fr));
+    gap:.9rem; margin-bottom:1.5rem;
+}
+.kpi {
+    background:rgba(255,255,255,.03);
+    border:1px solid var(--border);
+    border-radius:12px; padding:1rem;
+    text-align:center;
+}
+.kpi-val { font-size:1.55rem; font-weight:700; }
+.kpi-lbl { font-size:.7rem; color:var(--muted); text-transform:uppercase; letter-spacing:1px; margin-top:.2rem; }
+
+/* ── Risk badges ── */
+.badge {
+    display:inline-block; padding:.38rem 1.1rem;
+    border-radius:50px; font-weight:700; font-size:.95rem; letter-spacing:.6px;
+}
+.badge-low  { background:rgba(16,185,129,.12); color:var(--green); border:1px solid rgba(16,185,129,.25); }
+.badge-med  { background:rgba(245,158,11,.12); color:var(--amber); border:1px solid rgba(245,158,11,.25); }
+.badge-high { background:rgba(239,68,68,.12);  color:var(--red);   border:1px solid rgba(239,68,68,.25);  }
+
+/* ── Result card ── */
+.result-card {
+    background:rgba(11,15,25,.85);
+    backdrop-filter:blur(16px);
+    border:1px solid var(--border);
+    border-radius:18px; padding:2.25rem;
+    text-align:center; margin:1.5rem 0;
+    position:relative; overflow:hidden;
+}
+.result-card::before {
+    content:''; position:absolute; top:0; left:0; right:0; height:3px;
+}
+.rc-high::before { background:var(--red); }
+.rc-med::before  { background:var(--amber); }
+.rc-low::before  { background:var(--green); }
+
+.prob-num  { font-size:4rem; font-weight:800; line-height:1; }
+.prob-lbl  { font-size:.85rem; color:var(--muted); letter-spacing:2px; text-transform:uppercase; margin:.4rem 0 1.5rem; }
+
+/* ── Rec card ── */
+.rec-card {
+    background:rgba(59,130,246,.07);
+    border:1px solid rgba(59,130,246,.18);
+    border-radius:14px; padding:1.4rem;
+    margin-top:1.25rem;
+}
+.rec-section-lbl { font-size:.72rem; font-weight:700; letter-spacing:1.2px; text-transform:uppercase; color:var(--primary); margin-bottom:.25rem; }
+.rec-value { color:#e2e8f0; line-height:1.55; margin-bottom:1rem; }
+
+/* ── Feature bar ── */
+.feat-row { display:flex; align-items:center; margin-bottom:.7rem; }
+.feat-nm  { width:160px; text-align:right; padding-right:.9rem; font-size:.85rem; color:#cbd5e1; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.feat-bg  { flex-grow:1; height:7px; background:rgba(255,255,255,.09); border-radius:4px; overflow:hidden; }
+.feat-fill{ height:100%; background:linear-gradient(90deg,#3b82f6,#6366f1); border-radius:4px; }
+
+/* ── Upload area ── */
+.upload-zone {
+    border: 2px dashed rgba(59,130,246,.35);
+    border-radius: 14px; padding: 2.5rem;
+    text-align:center; background:rgba(59,130,246,.04);
+}
+.upload-zone p { color:var(--muted); margin:.35rem 0; }
+
+/* ── Progress bar override ── */
+div[data-testid="stProgress"] > div { border-radius:8px; }
+
+/* ── Button override ── */
+.stButton>button {
+    background:linear-gradient(135deg,#2563eb,#4f46e5) !important;
+    color:#fff !important; border:none !important;
+    border-radius:10px !important; font-weight:700 !important;
+    font-size:1rem !important; letter-spacing:.6px !important;
+    padding:.75rem 1.5rem !important;
+    box-shadow:0 4px 18px -3px var(--glow) !important;
+    transition:all .25s ease !important;
+    width:100% !important;
+}
+.stButton>button:hover {
+    transform:translateY(-2px) !important;
+    box-shadow:0 8px 28px -3px rgba(59,130,246,.55) !important;
+}
+
+/* ── Tab styling ── */
+.stTabs [data-baseweb="tab-list"]  { gap:1rem; background:transparent; border-bottom:1px solid var(--border); }
+.stTabs [data-baseweb="tab"]       { background:transparent; border:none; color:var(--muted); font-weight:600; font-size:.9rem; padding:.55rem 1.1rem; border-radius:8px 8px 0 0; }
+.stTabs [aria-selected="true"]     { background:rgba(59,130,246,.12) !important; color:var(--primary) !important; border-bottom:2px solid var(--primary) !important; }
+
+/* ── Input style ── */
+div[data-baseweb="select"]>div { background:rgba(15,23,42,.6)!important; border-color:rgba(255,255,255,.1)!important; border-radius:8px!important; }
+.stNumberInput>div>div>div { background:rgba(15,23,42,.6)!important; }
+input[type="number"] { color:#fff!important; }
+
+/* ── Dataframe ── */
+.stDataFrame { border-radius:10px; overflow:hidden; }
+
+/* ── Footer ── */
+.custom-footer {
+    text-align:center; padding:2.5rem 0; color:var(--muted);
+    font-size:.85rem; border-top:1px solid var(--border); margin-top:3rem;
+}
 </style>
 """, unsafe_allow_html=True)
 
-# =========================
-# Load Model Artifacts
-# =========================
-@st.cache_resource
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Helpers
+# ══════════════════════════════════════════════════════════════════════════════
+
+# ── Model columns expected by the pipeline ──────────────────────────────────
+REQUIRED_FEATURES = [
+    "gender", "SeniorCitizen", "Partner", "Dependents", "tenure",
+    "PhoneService", "MultipleLines", "InternetService", "OnlineSecurity",
+    "OnlineBackup", "DeviceProtection", "TechSupport", "StreamingTV",
+    "StreamingMovies", "Contract", "PaperlessBilling", "PaymentMethod",
+    "MonthlyCharges", "TotalCharges",
+]
+
+OPTIONAL_ID_COLS = {"customerid", "customer name", "customername", "email", "phone"}
+
+
+def risk_label(prob: float, threshold: float) -> tuple[str, str, str]:
+    """Return (risk_level, badge_class, card_class) tuple."""
+    high_thresh = min(0.85, threshold * 1.6)
+    if prob >= high_thresh:
+        return "High Risk", "badge-high", "rc-high"
+    elif prob >= threshold:
+        return "Medium Risk", "badge-med", "rc-med"
+    else:
+        return "Low Risk", "badge-low", "rc-low"
+
+
+def prediction_label(prob: float, threshold: float) -> str:
+    return "Likely to Churn" if prob >= threshold else "Not Likely to Churn"
+
+
+def color_for_risk(risk: str) -> str:
+    return {"High Risk": "var(--red)", "Medium Risk": "var(--amber)", "Low Risk": "var(--green)"}.get(risk, "#fff")
+
+
+def priority_color(priority: str) -> str:
+    return {"High": "var(--red)", "Medium": "var(--amber)", "Low": "var(--green)"}.get(priority, "#fff")
+
+
+@st.cache_resource(show_spinner=False)
 def load_artifacts():
     try:
         return joblib.load("churn_artifacts.pkl")
     except FileNotFoundError:
         return None
 
+
+def render_recommendation(rec: dict):
+    """Render a Gemini recommendation inside a styled card."""
+    priority = rec.get("priority", "Medium")
+    p_color = priority_color(priority)
+    st.markdown(f"""
+    <div class="rec-card">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:1rem;">
+            <span style="font-weight:700;font-size:1rem;color:#e2e8f0;">🤖 AI Business Recommendation</span>
+            <span class="badge {'badge-high' if priority=='High' else 'badge-med' if priority=='Medium' else 'badge-low'}"
+                  style="font-size:.78rem;">Priority: {priority}</span>
+        </div>
+        <div class="rec-section-lbl">Recommended Action</div>
+        <div class="rec-value">{rec.get('recommended_action','—')}</div>
+        <div class="rec-section-lbl">Reason</div>
+        <div class="rec-value">{rec.get('reason','—')}</div>
+        <div class="rec-section-lbl">Retention Strategy</div>
+        <div class="rec-value">{rec.get('retention_strategy','—')}</div>
+        <div class="rec-section-lbl">Suggested Next Step</div>
+        <div class="rec-value" style="margin-bottom:0">{rec.get('suggested_next_step','—')}</div>
+    </div>
+    """, unsafe_allow_html=True)
+
+
+def render_feature_bars(feat_df: pd.DataFrame | None):
+    if feat_df is None or feat_df.empty:
+        return
+    max_imp = feat_df["Importance"].max()
+    bars = ""
+    for _, row in feat_df.iterrows():
+        pct = (row["Importance"] / max_imp) * 100
+        name = (row["Feature"]
+                .replace("InternetService_", "Net: ")
+                .replace("PaymentMethod_", "Pay: ")
+                .replace("Contract_", "Ctr: "))[:20]
+        bars += f"""
+        <div class="feat-row">
+            <div class="feat-nm">{name}</div>
+            <div class="feat-bg"><div class="feat-fill" style="width:{pct:.1f}%"></div></div>
+        </div>"""
+    st.markdown(bars, unsafe_allow_html=True)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# App entry point
+# ══════════════════════════════════════════════════════════════════════════════
+
+# ── Load artifacts ────────────────────────────────────────────────────────────
 artifacts = load_artifacts()
 
-# =========================
-# UI Layout
-# =========================
+# ── Top nav ───────────────────────────────────────────────────────────────────
+gemini_ok = gs.is_gemini_available()
+model_ok  = artifacts is not None
+status_text  = "MODEL ONLINE" if model_ok else "MODEL OFFLINE"
+status_color = "var(--green)" if model_ok else "var(--red)"
 
-# Navigation Header
-st.markdown("""
+st.markdown(f"""
 <div class="top-nav">
-    <div class="brand">⚡ Churn<span class="brand-accent">IQ</span></div>
-    <div class="status-indicator">
-        <div class="status-dot"></div>
-        MODEL ONLINE
+    <div class="brand">⚡ Churn<span class="brand-accent">IQ</span>
+        <span style="font-size:.7rem;font-weight:400;color:var(--muted);margin-left:.6rem;">AI Retention Platform</span>
+    </div>
+    <div style="display:flex;gap:.75rem;align-items:center;">
+        {'<div class="status-pill"><div class="pulse"></div>GEMINI CONNECTED</div>' if gemini_ok else
+         '<div class="status-pill" style="color:var(--muted);background:rgba(255,255,255,.05);border-color:rgba(255,255,255,.1);">GEMINI OFFLINE</div>'}
+        <div class="status-pill" style="{'color:var(--green);background:rgba(16,185,129,.1);border-color:rgba(16,185,129,.22)' if model_ok else 'color:var(--red);background:rgba(239,68,68,.1);border-color:rgba(239,68,68,.22)'};">
+            <div class="pulse" style="background:{status_color};box-shadow:0 0 7px {status_color};"></div>
+            {status_text}
+        </div>
     </div>
 </div>
 """, unsafe_allow_html=True)
 
-# Hero Section
+# ── Hero ─────────────────────────────────────────────────────────────────────
 st.markdown("""
 <div class="hero">
     <h1>Predict Customer Churn Before It Happens</h1>
-    <p>Leverage our advanced XGBoost predictive analytics engine to assess customer risk profiles in real-time, interpret key drivers, and proactively deploy retention strategies.</p>
+    <p>Advanced XGBoost analytics + Gemini AI business intelligence — identify at-risk customers
+       and deploy precision retention strategies before churn occurs.</p>
 </div>
 """, unsafe_allow_html=True)
 
-
-if artifacts is None:
-    st.error("Model artifacts not found. Please ensure 'churn_artifacts.pkl' is present.")
+if not model_ok:
+    st.error("⚠️ `churn_artifacts.pkl` not found. Run `python train_model.py` first.", icon="🚨")
     st.stop()
 
-pipeline = artifacts["pipeline"]
+pipeline  = artifacts["pipeline"]
 threshold = artifacts["optimal_threshold"]
-metrics = artifacts["metrics"]
-feature_names = artifacts["feature_names"]
+metrics   = artifacts["metrics"]
+feat_names = artifacts.get("feature_names", [])
 
-MODEL_INPUT_COLUMNS = [
-    "gender", "SeniorCitizen", "Partner", "Dependents", "tenure",
-    "PhoneService", "MultipleLines", "InternetService", "OnlineSecurity",
-    "OnlineBackup", "DeviceProtection", "TechSupport", "StreamingTV",
-    "StreamingMovies", "Contract", "PaperlessBilling", "PaymentMethod",
-    "MonthlyCharges", "TotalCharges"
-]
-
-TOTAL_CHARGES_RATIO_MIN = 0.69
-TOTAL_CHARGES_RATIO_MAX = 1.58
-
-
-def estimated_total_charges(tenure_months, monthly_charge):
-    return round(float(tenure_months) * float(monthly_charge), 2)
-
-
-def get_churn_probability(model, input_data):
-    probabilities = model.predict_proba(input_data)[0]
-    classifier = model.named_steps.get("classifier")
-    classes = getattr(classifier, "classes_", getattr(model, "classes_", None))
-
-    if classes is None:
-        raise ValueError("The loaded model does not expose class labels for probability mapping.")
-
-    class_list = list(classes)
-    if 1 in class_list:
-        churn_index = class_list.index(1)
-    elif "Yes" in class_list:
-        churn_index = class_list.index("Yes")
-    elif True in class_list:
-        churn_index = class_list.index(True)
-    else:
-        raise ValueError(f"Could not identify the positive churn class from model classes: {class_list}")
-
-    return float(probabilities[churn_index]), class_list
-
-
-def build_result_summary(churn_probability, decision_threshold):
-    high_risk_threshold = min(0.9, max(decision_threshold + 0.15, decision_threshold * 1.5))
-
-    if churn_probability >= high_risk_threshold:
-        return {
-            "prediction_text": "Likely to Churn",
-            "risk_level": "High Risk",
-            "badge_class": "badge-high",
-            "card_class": "risk-high",
-            "color_hex": "#ef4444",
-            "action": "Prioritize retention outreach. Consider a targeted incentive, service review, or direct follow-up from the retention team."
-        }
-
-    if churn_probability >= decision_threshold:
-        return {
-            "prediction_text": "At Risk",
-            "risk_level": "Medium Risk",
-            "badge_class": "badge-med",
-            "card_class": "risk-med",
-            "color_hex": "#f59e0b",
-            "action": "Monitor engagement closely and consider a personalized offer or support check-in before the customer escalates to high risk."
-        }
-
-    return {
-        "prediction_text": "Likely to Stay",
-        "risk_level": "Low Risk",
-        "badge_class": "badge-low",
-        "card_class": "risk-low",
-        "color_hex": "#10b981",
-        "action": "No immediate retention action is required. Continue normal engagement and maintain service quality."
-    }
-
-# Attempt to extract feature importances
+# Global feature importances
 try:
-    xgb_model = pipeline.named_steps["classifier"]
+    xgb_model  = pipeline.named_steps["classifier"]
     importances = xgb_model.feature_importances_
-    feat_df = pd.DataFrame({'Feature': feature_names, 'Importance': importances})
-    feat_df = feat_df.sort_values(by='Importance', ascending=False).head(5)
-except:
-    feat_df = None
-
-
-# --- Input Form Area ---
-with st.container():
-    col1, col2 = st.columns([1, 1], gap="large")
-    
-    with col1:
-        st.markdown('<div class="section-header">👤 Personal Profile</div>', unsafe_allow_html=True)
-        c1, c2 = st.columns(2)
-        with c1: gender = st.selectbox("Gender", ["Female", "Male"])
-        with c2: senior_citizen = st.selectbox("Senior Citizen", [0, 1], format_func=lambda x: "Yes" if x==1 else "No")
-        
-        c3, c4 = st.columns(2)
-        with c3: partner = st.selectbox("Partner", ["Yes", "No"])
-        with c4: dependents = st.selectbox("Dependents", ["Yes", "No"])
-        
-        st.markdown('<br><div class="section-header">💳 Financial Data</div>', unsafe_allow_html=True)
-        monthly_charges = st.number_input("Monthly Charges ($)", min_value=0.0, max_value=130.0, value=70.0, step=5.0)
-
-    with col2:
-        st.markdown('<div class="section-header">📑 Account & Subscriptions</div>', unsafe_allow_html=True)
-        c7, c8 = st.columns(2)
-        with c7: tenure = st.number_input("Tenure (Months)", min_value=0, max_value=72, value=12)
-        with c8: contract = st.selectbox("Contract Type", ["Month-to-month", "One year", "Two year"])
-        
-        c9, c10 = st.columns(2)
-        with c9: payment_method = st.selectbox("Payment Method", ["Electronic check", "Mailed check", "Bank transfer (automatic)", "Credit card (automatic)"])
-        with c10: paperless_billing = st.selectbox("Paperless Billing", ["Yes", "No"])
-        
-        st.markdown('<br><div class="section-header">🌐 Subscribed Services</div>', unsafe_allow_html=True)
-        service_parent_1, service_parent_2 = st.columns(2)
-        with service_parent_1:
-            internet_service = st.selectbox("Internet", ["DSL", "Fiber optic", "No"])
-        with service_parent_2:
-            phone_service = st.selectbox("Phone", ["Yes", "No"])
-
-        service_1, service_2, service_3 = st.columns(3)
-        internet_disabled = internet_service == "No"
-        internet_options = ["No internet service"] if internet_disabled else ["Yes", "No"]
-        internet_help = (
-            "Automatically set because Internet Service is No."
-            if internet_disabled
-            else "Choose whether this internet add-on is active."
-        )
-
-        with service_1:
-            online_security = st.selectbox("Security", internet_options, disabled=internet_disabled, help=internet_help)
-            streaming_tv = st.selectbox("Stream TV", internet_options, disabled=internet_disabled, help=internet_help)
-        with service_2:
-            online_backup = st.selectbox("Backup", internet_options, disabled=internet_disabled, help=internet_help)
-            streaming_movies = st.selectbox("Stream Movies", internet_options, disabled=internet_disabled, help=internet_help)
-        with service_3:
-            device_protection = st.selectbox("Protection", internet_options, disabled=internet_disabled, help=internet_help)
-            tech_support = st.selectbox("Support", internet_options, disabled=internet_disabled, help=internet_help)
-
-        if internet_disabled:
-            st.caption("Internet add-ons are automatically set to 'No internet service' because this customer has no internet plan.")
-
-        phone_disabled = phone_service == "No"
-        multiple_line_options = ["No phone service"] if phone_disabled else ["No", "Yes"]
-        multiple_lines = st.selectbox(
-            "Multiple Lines",
-            multiple_line_options,
-            disabled=phone_disabled,
-            help="Automatically set because Phone Service is No." if phone_disabled else "Choose whether the phone plan has multiple lines."
-        )
-        if phone_disabled:
-            st.caption("Multiple Lines is automatically set to 'No phone service' because this customer has no phone plan.")
-
-st.markdown('<br><div class="section-header">💰 Total Charges Consistency</div>', unsafe_allow_html=True)
-calculated_total_charges = estimated_total_charges(tenure, monthly_charges)
-
-if tenure == 0:
-    total_charges = np.nan
-    st.info("Tenure is 0 months, so Total Charges is treated as missing/new-customer history. The model pipeline will handle it with its trained imputer.")
-else:
-    total_mode = st.radio(
-        "Total Charges",
-        ["Use calculated estimate", "Enter known historical total"],
-        horizontal=True,
-        help="Total Charges should stay connected to tenure and monthly charges. Use the estimate unless you have the actual historical billing total."
+    feat_df_global = (
+        pd.DataFrame({"Feature": feat_names, "Importance": importances})
+        .sort_values("Importance", ascending=False)
+        .head(8)
+        .reset_index(drop=True)
     )
+except Exception:
+    feat_df_global = None
 
-    if total_mode == "Use calculated estimate":
-        total_charges = calculated_total_charges
-        st.metric("Estimated Total Charges ($)", f"${total_charges:,.2f}")
-        st.caption("Calculated from the selected tenure and monthly charge. Switch modes only if you know the customer's actual historical total.")
-    else:
-        lower_total = max(0.0, calculated_total_charges * TOTAL_CHARGES_RATIO_MIN)
-        upper_total = min(9000.0, max(calculated_total_charges * TOTAL_CHARGES_RATIO_MAX, monthly_charges))
-        total_charges = st.number_input(
-            "Known Historical Total Charges ($)",
-            min_value=float(lower_total),
-            max_value=float(upper_total),
-            value=float(calculated_total_charges),
-            step=50.0,
-            key=f"known_total_{tenure}_{monthly_charges}",
-            help="Limited to the observed dataset relationship between Total Charges, Tenure, and Monthly Charges."
-        )
-        st.caption(f"Allowed range: ${lower_total:,.2f} to ${upper_total:,.2f}, based on the dataset's observed Total Charges relationship.")
-
-# --- CTA ---
-st.markdown("<br><br>", unsafe_allow_html=True)
-_, btn_col, _ = st.columns([1, 2, 1])
-with btn_col:
-    predict_button = st.button("Analyze Churn Risk")
+# ── Tabs ──────────────────────────────────────────────────────────────────────
+tab1, tab2 = st.tabs(["👤  Single Customer", "📊  Batch Analysis"])
 
 
-# --- Prediction Logic & Result ---
-if predict_button:
-    # Build dataframe directly from raw inputs - Pipeline handles the rest!
-    input_data = pd.DataFrame({
-        "gender": [gender],
-        "SeniorCitizen": [senior_citizen],
-        "Partner": [partner],
-        "Dependents": [dependents],
-        "tenure": [tenure],
-        "PhoneService": [phone_service],
-        "MultipleLines": [multiple_lines],
-        "InternetService": [internet_service],
-        "OnlineSecurity": [online_security],
-        "OnlineBackup": [online_backup],
-        "DeviceProtection": [device_protection],
-        "TechSupport": [tech_support],
-        "StreamingTV": [streaming_tv],
-        "StreamingMovies": [streaming_movies],
-        "Contract": [contract],
-        "PaperlessBilling": [paperless_billing],
-        "PaymentMethod": [payment_method],
-        "MonthlyCharges": [monthly_charges],
-        "TotalCharges": [total_charges]
-    }, columns=MODEL_INPUT_COLUMNS)
-    
-    # Inference using the model's actual positive-class probability and optimized threshold.
-    prob, model_classes = get_churn_probability(pipeline, input_data)
-    confidence = max(prob, 1 - prob)
-    result = build_result_summary(prob, threshold)
+# ══════════════════════════════════════════════════════════════════════════════
+# TAB 1 – Single Customer
+# ══════════════════════════════════════════════════════════════════════════════
+with tab1:
 
-    # Render Result
-    st.html(f"""
-    <div class="result-card {result["card_class"]}">
-        <div class="risk-badge {result["badge_class"]}">
-            {result["risk_level"]}
-        </div>
-        <div style="font-size: 1.5rem; font-weight: 700; margin-bottom: 1rem; color: #fff;">
-            Prediction: {result["prediction_text"]}
-        </div>
-        <div class="prob-value" style="color: {result["color_hex"]};">{prob:.1%}</div>
-        <div class="prob-label">Estimated Churn Probability</div>
+    # ── Input form ────────────────────────────────────────────────────────────
+    col_l, col_r = st.columns(2, gap="large")
 
-        <div style="color: #e2e8f0; font-size: 1rem; line-height: 1.8; margin-bottom: 1.75rem;">
-            <strong>Risk Level:</strong> {result["risk_level"]}<br>
-            <strong>Decision Threshold:</strong> {threshold:.2f}<br>
-            <strong>Model Confidence:</strong> {confidence:.1%}
-        </div>
-        
-        <div style="max-width: 600px; margin: 0 auto; color: var(--text-muted); line-height: 1.6; padding-top: 1rem; border-top: 1px solid var(--card-border);">
-            <strong>Suggested Business Action:</strong><br> {result["action"]}
-        </div>
-    </div>
-    """)
+    with col_l:
+        st.markdown('<div class="sec-hdr">👤 Personal Profile</div>', unsafe_allow_html=True)
+        r1c1, r1c2 = st.columns(2)
+        with r1c1: gender        = st.selectbox("Gender", ["Female", "Male"], key="s_gender")
+        with r1c2: senior_citizen = st.selectbox("Senior Citizen", [0, 1],
+                                                  format_func=lambda x: "Yes" if x else "No", key="s_senior")
+        r2c1, r2c2 = st.columns(2)
+        with r2c1: partner    = st.selectbox("Partner",    ["Yes", "No"], key="s_partner")
+        with r2c2: dependents = st.selectbox("Dependents", ["Yes", "No"], key="s_dep")
 
+        st.markdown('<br><div class="sec-hdr">💳 Financial</div>', unsafe_allow_html=True)
+        r3c1, r3c2 = st.columns(2)
+        with r3c1: monthly_charges = st.number_input("Monthly Charges ($)", 0.0, 200.0, 70.0, step=5.0,  key="s_mc")
+        with r3c2: total_charges   = st.number_input("Total Charges ($)",   0.0, 10000.0, 1000.0, step=50.0, key="s_tc")
 
-# --- Model Information & Global Interpretability ---
-st.markdown("<br><br>", unsafe_allow_html=True)
-st.markdown('<div class="section-header">⚙️ System Architecture & Global Insights</div>', unsafe_allow_html=True)
+    with col_r:
+        st.markdown('<div class="sec-hdr">📑 Account & Contract</div>', unsafe_allow_html=True)
+        r4c1, r4c2 = st.columns(2)
+        with r4c1: tenure   = st.number_input("Tenure (months)", 0, 72, 12, key="s_tenure")
+        with r4c2: contract = st.selectbox("Contract", ["Month-to-month", "One year", "Two year"], key="s_contract")
+        r5c1, r5c2 = st.columns(2)
+        with r5c1: payment_method   = st.selectbox("Payment Method",
+            ["Electronic check", "Mailed check", "Bank transfer (automatic)", "Credit card (automatic)"], key="s_pm")
+        with r5c2: paperless_billing = st.selectbox("Paperless Billing", ["Yes", "No"], key="s_pb")
 
-mc1, mc2 = st.columns([3, 2], gap="large")
+        st.markdown('<br><div class="sec-hdr">🌐 Services</div>', unsafe_allow_html=True)
+        sc1, sc2, sc3 = st.columns(3)
+        INET_OPTS  = ["Yes", "No", "No internet service"]
+        PHONE_OPTS = ["No", "Yes", "No phone service"]
+        with sc1:
+            phone_service = st.selectbox("Phone",     ["Yes", "No"],  key="s_phone")
+            online_sec    = st.selectbox("Security",  INET_OPTS,      key="s_sec")
+            streaming_tv  = st.selectbox("Stream TV", INET_OPTS,      key="s_tv")
+        with sc2:
+            multi_lines   = st.selectbox("Multi Lines", PHONE_OPTS,   key="s_ml")
+            online_backup = st.selectbox("Backup",      INET_OPTS,    key="s_bk")
+            streaming_mov = st.selectbox("Stream Film",  INET_OPTS,   key="s_mov")
+        with sc3:
+            internet_svc  = st.selectbox("Internet",   ["DSL", "Fiber optic", "No"], key="s_inet")
+            device_prot   = st.selectbox("Protection",  INET_OPTS,    key="s_dp")
+            tech_support  = st.selectbox("Support",     INET_OPTS,    key="s_ts")
 
-with mc1:
-    st.markdown("""
-    <p style="color: var(--text-muted); margin-bottom: 1.5rem;">
-    Our machine learning pipeline uses XGBoost combined with a dynamically optimized classification threshold to prioritize F1-score over raw accuracy, maximizing business value by balancing Precision and Recall.
-    </p>
-    """, unsafe_allow_html=True)
-    
-    st.markdown(f"""
-    <div class="model-info-grid">
-        <div class="model-metric">
-            <div class="metric-val">XGBoost</div>
-            <div class="metric-lbl">Core Algorithm</div>
-        </div>
-        <div class="model-metric">
-            <div class="metric-val">{threshold:.2f}</div>
-            <div class="metric-lbl">Optimal Threshold</div>
-        </div>
-        <div class="model-metric">
-            <div class="metric-val">{metrics['f1']:.3f}</div>
-            <div class="metric-lbl">F1-Score</div>
-        </div>
-        <div class="model-metric">
-            <div class="metric-val">{metrics['roc_auc']:.3f}</div>
-            <div class="metric-lbl">ROC-AUC</div>
-        </div>
-        <div class="model-metric">
-            <div class="metric-val">{metrics['pr_auc']:.3f}</div>
-            <div class="metric-lbl">PR-AUC</div>
-        </div>
-    </div>
-    """, unsafe_allow_html=True)
+    # ── CTA ───────────────────────────────────────────────────────────────────
+    st.markdown("<br>", unsafe_allow_html=True)
+    _, cta_col, _ = st.columns([1, 1.5, 1])
+    with cta_col:
+        analyze = st.button("⚡  ANALYZE CHURN RISK", key="btn_single")
 
-with mc2:
-    if feat_df is not None:
-        st.markdown("<p style='color: var(--text-muted); font-size: 0.85rem; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 1rem;'>Top 5 Global Churn Factors</p>", unsafe_allow_html=True)
-        max_imp = feat_df['Importance'].max()
-        html_bars = ""
-        for _, row in feat_df.iterrows():
-            pct = (row['Importance'] / max_imp) * 100
-            name = row['Feature'].replace('InternetService_', 'Net: ').replace('PaymentMethod_', 'Pay: ').replace('Contract_', 'Contract: ')
-            if len(name) > 18:
-                name = name[:16] + ".."
-            html_bars += f"""
-            <div class="feat-bar-container">
-                <div class="feat-name">{name}</div>
-                <div class="feat-bar-bg">
-                    <div class="feat-bar-fill" style="width: {pct}%;"></div>
-                </div>
+    # ── Prediction ────────────────────────────────────────────────────────────
+    if analyze:
+        input_data = pd.DataFrame([{
+            "gender": gender, "SeniorCitizen": senior_citizen,
+            "Partner": partner, "Dependents": dependents, "tenure": tenure,
+            "PhoneService": phone_service, "MultipleLines": multi_lines,
+            "InternetService": internet_svc, "OnlineSecurity": online_sec,
+            "OnlineBackup": online_backup, "DeviceProtection": device_prot,
+            "TechSupport": tech_support, "StreamingTV": streaming_tv,
+            "StreamingMovies": streaming_mov, "Contract": contract,
+            "PaperlessBilling": paperless_billing, "PaymentMethod": payment_method,
+            "MonthlyCharges": monthly_charges, "TotalCharges": total_charges,
+        }])
+
+        with st.spinner("Running ML inference…"):
+            try:
+                prob       = float(pipeline.predict_proba(input_data)[0][1])
+                risk, bdg, rcc = risk_label(prob, threshold)
+                pred_label = prediction_label(prob, threshold)
+                risk_color = color_for_risk(risk)
+            except Exception as e:
+                st.error(f"Prediction error: {e}")
+                st.stop()
+
+        # ── Result card ───────────────────────────────────────────────────────
+        st.markdown(f"""
+        <div class="result-card {rcc}">
+            <span class="badge {bdg}" style="margin-bottom:1.2rem;">{risk}</span><br>
+            <div class="prob-num" style="color:{risk_color};">{prob:.1%}</div>
+            <div class="prob-lbl">Churn Probability</div>
+            <div style="font-size:1.1rem;font-weight:600;color:#e2e8f0;margin-bottom:.5rem;">
+                Prediction: {pred_label}
             </div>
-            """
-        st.markdown(html_bars, unsafe_allow_html=True)
+            <div style="font-size:.85rem;color:var(--muted);">
+                Decision threshold: {threshold:.2f} &nbsp;|&nbsp;
+                Confidence: {"High" if abs(prob - threshold) > 0.25 else "Medium" if abs(prob - threshold) > 0.1 else "Low"}
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
 
-# --- Footer ---
+        # ── Gemini recommendation ─────────────────────────────────────────────
+        if gemini_ok:
+            with st.spinner("Generating AI business recommendation…"):
+                rec = gs.get_recommendation(
+                    customer_attrs=input_data.iloc[0].to_dict(),
+                    churn_prob=prob, risk_level=risk, prediction=pred_label,
+                )
+            render_recommendation(rec)
+        else:
+            st.info("ℹ️ Add your `GEMINI_API_KEY` to `.env` to enable AI business recommendations.", icon="🔑")
+
+    # ── Model info / global features ──────────────────────────────────────────
+    st.markdown("<br><br>", unsafe_allow_html=True)
+    st.markdown('<div class="sec-hdr">⚙️ Model Diagnostics</div>', unsafe_allow_html=True)
+    mi_col, fi_col = st.columns([3, 2], gap="large")
+
+    with mi_col:
+        st.markdown(f"""
+        <div class="kpi-grid">
+            <div class="kpi"><div class="kpi-val">XGBoost</div><div class="kpi-lbl">Algorithm</div></div>
+            <div class="kpi"><div class="kpi-val">{threshold:.2f}</div><div class="kpi-lbl">Threshold</div></div>
+            <div class="kpi"><div class="kpi-val">{metrics['f1']:.3f}</div><div class="kpi-lbl">F1-Score</div></div>
+            <div class="kpi"><div class="kpi-val">{metrics['roc_auc']:.3f}</div><div class="kpi-lbl">ROC-AUC</div></div>
+            <div class="kpi"><div class="kpi-val">{metrics['pr_auc']:.3f}</div><div class="kpi-lbl">PR-AUC</div></div>
+            <div class="kpi"><div class="kpi-val">{metrics['recall']:.3f}</div><div class="kpi-lbl">Recall</div></div>
+        </div>
+        """, unsafe_allow_html=True)
+
+    with fi_col:
+        st.markdown('<p style="color:var(--muted);font-size:.72rem;text-transform:uppercase;letter-spacing:1px;margin-bottom:.9rem;">Top Churn Drivers</p>', unsafe_allow_html=True)
+        render_feature_bars(feat_df_global)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# TAB 2 – Batch Analysis
+# ══════════════════════════════════════════════════════════════════════════════
+with tab2:
+
+    st.markdown("""
+    <div class="upload-zone">
+        <p style="font-size:1.05rem;font-weight:600;color:#e2e8f0;">📂 Upload Customer CSV for Batch Analysis</p>
+        <p>CSV must include the required model features. Optional columns like <code>customerID</code> are preserved in the report.</p>
+        <p style="font-size:.8rem;">Required columns: gender · SeniorCitizen · Partner · Dependents · tenure · PhoneService · MultipleLines · InternetService ·
+        OnlineSecurity · OnlineBackup · DeviceProtection · TechSupport · StreamingTV · StreamingMovies · Contract · PaperlessBilling · PaymentMethod · MonthlyCharges · TotalCharges</p>
+    </div>
+    """, unsafe_allow_html=True)
+
+    uploaded = st.file_uploader("", type=["csv"], key="batch_upload", label_visibility="collapsed")
+
+    if uploaded is not None:
+        # ── 1. Load & validate ─────────────────────────────────────────────────
+        try:
+            raw_df = pd.read_csv(uploaded)
+        except Exception as e:
+            st.error(f"Could not parse CSV: {e}")
+            st.stop()
+
+        if raw_df.empty:
+            st.error("The uploaded CSV is empty.")
+            st.stop()
+
+        present_cols_lower = {c.lower(): c for c in raw_df.columns}
+        missing = [f for f in REQUIRED_FEATURES if f not in raw_df.columns]
+        extra   = [c for c in raw_df.columns
+                   if c not in REQUIRED_FEATURES and c.lower() not in OPTIONAL_ID_COLS]
+
+        if missing:
+            st.error(f"❌ Missing required columns ({len(missing)}): `{'`, `'.join(missing)}`")
+            st.stop()
+
+        if extra:
+            st.warning(f"⚠️ Unexpected columns (will be ignored for ML): `{'`, `'.join(extra)}`")
+
+        # Detect identifier column
+        id_col = None
+        for cname in ["customerID", "customerid", "customer_id", "CustomerID"]:
+            if cname in raw_df.columns:
+                id_col = cname
+                break
+
+        # ── 2. ML prediction for ALL customers ────────────────────────────────
+        X_batch = raw_df[REQUIRED_FEATURES].copy()
+        with st.spinner(f"Running ML predictions for {len(X_batch)} customers…"):
+            try:
+                probs = pipeline.predict_proba(X_batch)[:, 1]
+            except Exception as e:
+                st.error(f"ML prediction error: {e}")
+                st.stop()
+
+        risk_labels_list = [risk_label(p, threshold)[0] for p in probs]
+        pred_labels_list = [prediction_label(p, threshold) for p in probs]
+
+        results_df = raw_df.copy()
+        if id_col:
+            results_df = results_df[[id_col] + [c for c in results_df.columns if c != id_col]]
+        results_df["Churn Probability"] = (probs * 100).round(1).astype(str) + "%"
+        results_df["Churn Probability (raw)"] = probs.round(4)
+        results_df["Risk Level"]        = risk_labels_list
+        results_df["Prediction"]        = pred_labels_list
+        results_df["Confidence"]        = [
+            "High" if abs(p - threshold) > 0.25 else
+            "Medium" if abs(p - threshold) > 0.1 else "Low"
+            for p in probs
+        ]
+
+        # ── 3. KPI summary ────────────────────────────────────────────────────
+        n_total  = len(results_df)
+        n_high   = (results_df["Risk Level"] == "High Risk").sum()
+        n_med    = (results_df["Risk Level"] == "Medium Risk").sum()
+        n_low    = (results_df["Risk Level"] == "Low Risk").sum()
+        avg_prob = probs.mean()
+        n_churn  = (results_df["Prediction"] == "Likely to Churn").sum()
+
+        st.markdown(f"""
+        <div class="kpi-grid" style="margin-top:1.5rem;">
+            <div class="kpi"><div class="kpi-val">{n_total:,}</div><div class="kpi-lbl">Total Customers</div></div>
+            <div class="kpi"><div class="kpi-val" style="color:var(--red);">{n_high:,}</div><div class="kpi-lbl">High Risk</div></div>
+            <div class="kpi"><div class="kpi-val" style="color:var(--amber);">{n_med:,}</div><div class="kpi-lbl">Medium Risk</div></div>
+            <div class="kpi"><div class="kpi-val" style="color:var(--green);">{n_low:,}</div><div class="kpi-lbl">Low Risk</div></div>
+            <div class="kpi"><div class="kpi-val">{avg_prob:.1%}</div><div class="kpi-lbl">Avg Churn Prob</div></div>
+            <div class="kpi"><div class="kpi-val">{n_churn:,}</div><div class="kpi-lbl">Predicted Churners</div></div>
+        </div>
+        """, unsafe_allow_html=True)
+
+        # ── 4. Charts ─────────────────────────────────────────────────────────
+        import matplotlib.pyplot as plt
+        import matplotlib.patches as mpatches
+
+        chart_style = {
+            "figure.facecolor": "#0b0f19", "axes.facecolor": "#0b0f19",
+            "axes.edgecolor": "none", "axes.labelcolor": "#94a3b8",
+            "xtick.color": "#94a3b8", "ytick.color": "#94a3b8",
+            "text.color": "#f8fafc", "grid.color": "rgba(255,255,255,0.05)",
+        }
+        plt.rcParams.update(chart_style)
+
+        ch1, ch2 = st.columns(2, gap="large")
+
+        with ch1:
+            st.markdown('<div class="sec-hdr">Risk Distribution</div>', unsafe_allow_html=True)
+            fig, ax = plt.subplots(figsize=(5, 3.2))
+            risk_counts = results_df["Risk Level"].value_counts()
+            colors      = {"High Risk": "#ef4444", "Medium Risk": "#f59e0b", "Low Risk": "#10b981"}
+            for rl, cnt in risk_counts.items():
+                ax.bar(rl, cnt, color=colors.get(rl, "#3b82f6"), width=0.55, zorder=3)
+                ax.text(list(risk_counts.index).index(rl), cnt + max(risk_counts) * 0.01,
+                        str(cnt), ha="center", va="bottom", fontsize=9, color="#f8fafc")
+            ax.set_ylabel("Customers"); ax.grid(axis="y", zorder=0); ax.set_axisbelow(True)
+            fig.tight_layout()
+            st.pyplot(fig); plt.close(fig)
+
+        with ch2:
+            st.markdown('<div class="sec-hdr">Churn Probability Distribution</div>', unsafe_allow_html=True)
+            fig2, ax2 = plt.subplots(figsize=(5, 3.2))
+            ax2.hist(probs, bins=30, color="#3b82f6", alpha=0.8, edgecolor="none", zorder=3)
+            ax2.axvline(threshold, color="#ef4444", linewidth=1.5, linestyle="--", label=f"Threshold {threshold:.2f}")
+            ax2.set_xlabel("Churn Probability"); ax2.set_ylabel("Count")
+            ax2.legend(fontsize=8); ax2.grid(axis="y", zorder=0); ax2.set_axisbelow(True)
+            fig2.tight_layout()
+            st.pyplot(fig2); plt.close(fig2)
+
+        # ── 5. Top-N table ────────────────────────────────────────────────────
+        st.markdown('<div class="sec-hdr">🔴 Highest Risk Customers</div>', unsafe_allow_html=True)
+        top_n = st.slider("Show top N highest-risk customers", 5, min(100, n_total), min(20, n_total), key="top_n_slider")
+        top_df = (
+            results_df
+            .sort_values("Churn Probability (raw)", ascending=False)
+            .head(top_n)
+            .reset_index(drop=True)
+        )
+        display_cols = ([id_col] if id_col else []) + ["Churn Probability", "Risk Level", "Prediction", "Confidence"]
+        st.dataframe(top_df[display_cols], use_container_width=True, hide_index=True)
+
+        # ── 6. Filterable full table ───────────────────────────────────────────
+        with st.expander("🔍 Filter & Browse All Customers"):
+            filter_risk = st.multiselect("Filter by Risk Level",
+                ["High Risk", "Medium Risk", "Low Risk"],
+                default=["High Risk", "Medium Risk", "Low Risk"], key="filt_risk")
+            filter_pred = st.multiselect("Filter by Prediction",
+                ["Likely to Churn", "Not Likely to Churn"],
+                default=["Likely to Churn", "Not Likely to Churn"], key="filt_pred")
+
+            filtered = results_df[
+                (results_df["Risk Level"].isin(filter_risk)) &
+                (results_df["Prediction"].isin(filter_pred))
+            ].reset_index(drop=True)
+
+            st.markdown(f"<p style='color:var(--muted);font-size:.85rem;'>{len(filtered)} customers match filters</p>", unsafe_allow_html=True)
+            st.dataframe(filtered[display_cols], use_container_width=True, hide_index=True)
+
+        # ── 7. Gemini batch recommendations ───────────────────────────────────
+        st.markdown("---")
+        st.markdown('<div class="sec-hdr">🤖 AI Business Recommendations</div>', unsafe_allow_html=True)
+
+        if not gemini_ok:
+            st.info("ℹ️ Add your `GEMINI_API_KEY` to `.env` to enable AI recommendations.", icon="🔑")
+        else:
+            gem_scope = st.radio(
+                "Generate AI recommendations for:",
+                ["Top 10 Highest Risk", "Top 20 Highest Risk", "All High Risk", "High + Medium Risk"],
+                horizontal=True, key="gem_scope",
+            )
+
+            scope_df = results_df.sort_values("Churn Probability (raw)", ascending=False)
+            if gem_scope == "Top 10 Highest Risk":
+                scope_df = scope_df.head(10)
+            elif gem_scope == "Top 20 Highest Risk":
+                scope_df = scope_df.head(20)
+            elif gem_scope == "All High Risk":
+                scope_df = scope_df[scope_df["Risk Level"] == "High Risk"]
+            else:
+                scope_df = scope_df[scope_df["Risk Level"].isin(["High Risk", "Medium Risk"])]
+
+            scope_df = scope_df.reset_index(drop=True)
+            st.markdown(f"<p style='color:var(--muted);font-size:.85rem;'>Will call Gemini for <strong style='color:#e2e8f0;'>{len(scope_df)}</strong> customers.</p>", unsafe_allow_html=True)
+
+            if st.button("🚀 Generate AI Recommendations", key="btn_gemini_batch"):
+                progress = st.progress(0, text="Calling Gemini API…")
+                batch_recs = []
+
+                for i, (_, row) in enumerate(scope_df.iterrows()):
+                    prob_val = row["Churn Probability (raw)"]
+                    attrs    = {c: row[c] for c in REQUIRED_FEATURES if c in row}
+                    rec      = gs.get_recommendation(
+                        customer_attrs=attrs,
+                        churn_prob=prob_val,
+                        risk_level=row["Risk Level"],
+                        prediction=row["Prediction"],
+                    )
+                    batch_recs.append(rec)
+                    progress.progress((i + 1) / len(scope_df),
+                                      text=f"Generating… {i+1}/{len(scope_df)}")
+
+                progress.empty()
+                st.success(f"✅ Generated recommendations for {len(scope_df)} customers.")
+
+                # Assemble combined report df
+                rec_df = pd.DataFrame(batch_recs)
+                if id_col:
+                    rec_df.insert(0, id_col, scope_df[id_col].values)
+                rec_df.insert(1 if id_col else 0, "Churn Probability", scope_df["Churn Probability"].values)
+                rec_df.insert(2 if id_col else 1, "Risk Level",        scope_df["Risk Level"].values)
+                rec_df.insert(3 if id_col else 2, "Prediction",        scope_df["Prediction"].values)
+
+                st.dataframe(rec_df, use_container_width=True, hide_index=True)
+
+                # Store in session for export
+                st.session_state["batch_rec_df"] = rec_df
+
+        # ── 8. Downloads ───────────────────────────────────────────────────────
+        st.markdown('<div class="sec-hdr" style="margin-top:2rem;">📥 Export Reports</div>', unsafe_allow_html=True)
+        dl1, dl2 = st.columns(2)
+
+        with dl1:
+            csv_pred = results_df.drop(columns=["Churn Probability (raw)"], errors="ignore").to_csv(index=False)
+            st.download_button(
+                label="⬇️  Download ML Prediction Report (CSV)",
+                data=csv_pred,
+                file_name="churniq_predictions.csv",
+                mime="text/csv",
+                use_container_width=True,
+                key="dl_pred",
+            )
+
+        with dl2:
+            rec_data = st.session_state.get("batch_rec_df")
+            if rec_data is not None:
+                csv_rec = rec_data.to_csv(index=False)
+                st.download_button(
+                    label="⬇️  Download AI Recommendation Report (CSV)",
+                    data=csv_rec,
+                    file_name="churniq_ai_recommendations.csv",
+                    mime="text/csv",
+                    use_container_width=True,
+                    key="dl_rec",
+                )
+            else:
+                st.button("⬇️  Download AI Report (generate first)", disabled=True, use_container_width=True, key="dl_rec_dis")
+
+# ── Footer ────────────────────────────────────────────────────────────────────
 st.markdown("""
 <div class="custom-footer">
-    <strong>ChurnIQ</strong> &bull; Machine Learning Customer Analytics &bull; Capstone Project Deployment
+    <strong>ChurnIQ</strong> &bull; AI-Powered Customer Retention Platform &bull;
+    ML predictions are provided for decision-support only and should be reviewed by a human retention specialist.
 </div>
 """, unsafe_allow_html=True)
